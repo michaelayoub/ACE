@@ -5,7 +5,7 @@
 
     <IsPackable>false</IsPackable>
 
-    <Platforms>x64</Platforms>
+    <Platforms>osx-arm64</Platforms>
 
     <Authors>ACEmulator Contributors</Authors>
 
