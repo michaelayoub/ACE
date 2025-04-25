@@ -154,6 +154,12 @@ namespace ACE.Server
             log.Info("Initializing ConfigManager...");
             ConfigManager.Initialize();
 
+            if (ConfigManager.Config.Redis.Host == null)
+            {
+                log.Error("Redis Host is empty. Please set Redis.Host in Config.js to <hostname>:<port>.");
+                Environment.Exit(1);
+            }
+
             log.Info("Initializing ModManager...");
             ModManager.Initialize();
 
@@ -258,6 +264,9 @@ namespace ACE.Server
 
             log.Info("Starting DatabaseManager...");
             DatabaseManager.Start();
+
+            log.Info("Starting RedisManager...");
+            RedisManager.Start();
 
             log.Info("Starting PropertyManager...");
             PropertyManager.Initialize();
