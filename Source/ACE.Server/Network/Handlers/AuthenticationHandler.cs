@@ -234,12 +234,12 @@ namespace ACE.Server.Network.Handlers
 
         public static void HandleConnectResponse(Session session)
         {
+            Console.WriteLine("Handling connect response");
             if (WorldManager.WorldStatus == WorldManager.WorldStatusState.Open || session.AccessLevel > AccessLevel.Player)
             {
                 DatabaseManager.Shard.GetCharacters(session.AccountId, false, result =>
                 {
                     // If you want to create default characters for accounts that have none, here is where you would do it.
-
                     SendConnectResponse(session, result);
                 });
             }

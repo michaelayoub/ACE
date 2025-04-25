@@ -2,6 +2,8 @@ using System;
 
 using ACE.Server.Network.Structure;
 
+using log4net;
+
 namespace ACE.Server.Network.GameAction.Actions
 {
     /// <summary>
@@ -9,6 +11,8 @@ namespace ACE.Server.Network.GameAction.Actions
     /// </summary>
     public static class GameActionMoveToState
     {
+        private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
+
         [GameAction(GameActionType.MoveToState)]
         public static void Handle(ClientMessage message, Session session)
         {
@@ -18,6 +22,8 @@ namespace ACE.Server.Network.GameAction.Actions
 
             var moveToState = new MoveToState(session.Player, message.Payload);
             session.Player.CurrentMoveToState = moveToState;
+
+            log.Debug($"InstanceSequence = {moveToState.InstanceSequence}, ServerControlSequence = {moveToState.ServerControlSequence}, TeleportSequence = {moveToState.TeleportSequence},  ForcePositionSequence = {moveToState.ForcePositionSequence}");
 
             if (session.Player.IsPlayerMovingTo)
                 session.Player.StopExistingMoveToChains();

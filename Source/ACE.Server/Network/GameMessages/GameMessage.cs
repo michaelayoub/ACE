@@ -1,26 +1,21 @@
 using System;
+using System.IO;
 
 namespace ACE.Server.Network.GameMessages
 {
     public abstract class GameMessage
     {
         public GameMessageOpcode Opcode { get; private set; }
-
         public GameMessageGroup Group { get; private set; }
-
-        public System.IO.MemoryStream Data { get; private set; }
-
-        protected System.IO.BinaryWriter Writer { get; private set; }
+        public MemoryStream Data { get; private set; }
+        public BinaryWriter Writer { get; private set; }
 
         protected GameMessage(GameMessageOpcode opCode, GameMessageGroup group)
         {
             Opcode = opCode;
-
             Group = group;
-
-            Data = new System.IO.MemoryStream();
-
-            Writer = new System.IO.BinaryWriter(Data);
+            Data = new MemoryStream();
+            Writer = new BinaryWriter(Data);
 
             if (Opcode != GameMessageOpcode.None)
                 Writer.Write((uint)Opcode);
@@ -35,12 +30,9 @@ namespace ACE.Server.Network.GameMessages
         protected GameMessage(GameMessageOpcode opCode, GameMessageGroup group, int dataInitialCapacity)
         {
             Opcode = opCode;
-
             Group = group;
-
-            Data = new System.IO.MemoryStream(dataInitialCapacity);
-
-            Writer = new System.IO.BinaryWriter(Data);
+            Data = new MemoryStream(dataInitialCapacity);
+            Writer = new BinaryWriter(Data);
 
             if (Opcode != GameMessageOpcode.None)
                 Writer.Write((uint)Opcode);

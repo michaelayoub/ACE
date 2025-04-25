@@ -135,6 +135,7 @@ namespace ACE.Server.Network.Managers
                 try
                 {
                     actionHandlerInfo.Handler.Invoke(message, session);
+                    log.Info($"Executed action handler for {message}, opcode {opcode}.");
                 }
                 catch (Exception ex)
                 {

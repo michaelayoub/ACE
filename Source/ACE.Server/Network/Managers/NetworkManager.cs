@@ -26,8 +26,8 @@ namespace ACE.Server.Network.Managers
         public const ushort ServerId = 0xB;
 
         /// <summary>
-        /// Seconds until a session will timeout. 
-        /// Raising this value allows connections to remain active for a longer period of time. 
+        /// Seconds until a session will timeout.
+        /// Raising this value allows connections to remain active for a longer period of time.
         /// </summary>
         /// <remarks>
         /// If you're experiencing network dropouts or frequent disconnects, try increasing this value.
@@ -44,14 +44,17 @@ namespace ACE.Server.Network.Managers
 
         public static void ProcessPacket(ConnectionListener connectionListener, ClientPacket packet, IPEndPoint endPoint)
         {
+            Console.WriteLine("Received a packet: " + packet.ToString());
             if (connectionListener.ListenerEndpoint.Port == ConfigManager.Config.Server.Network.Port + 1)
             {
+                Console.WriteLine("Received a +1 packet: " + packet.ToString());
                 //ServerPerformanceMonitor.RestartEvent(ServerPerformanceMonitor.MonitorType.ProcessPacket_1);
                 if (packet.Header.Flags.HasFlag(PacketHeaderFlags.ConnectResponse))
                 {
+                    Console.WriteLine("It has a ConnectResponse flag");
                     packetLog.DebugFormat("{0}, {1}", packet, endPoint);
                     PacketInboundConnectResponse connectResponse = new PacketInboundConnectResponse(packet);
-
+                    Console.WriteLine(connectResponse.ToString());
                     // This should be set on the second packet to the server from the client.
                     // This completes the three-way handshake.
                     sessionLock.EnterReadLock();
@@ -66,6 +69,8 @@ namespace ACE.Server.Network.Managers
                                  k.Network.ConnectionData.ConnectionCookie == connectResponse.Check &&
                                  k.EndPointC2S.Address.Equals(endPoint.Address)
                              select k).FirstOrDefault();
+                        Console.WriteLine(session);
+                        Console.WriteLine(sessionMap);
                     }
                     finally
                     {

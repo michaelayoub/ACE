@@ -24,28 +24,43 @@ namespace ACE.Server.Network
             try
             {
                 if (bufferSize < PacketHeader.HeaderSize)
+                {
+                    Console.WriteLine("Client packet dropped because buffer size is too small (smaller than packet header size).");
                     return false;
+                }
 
                 Header.Unpack(buffer);
 
                 if (Header.Size > bufferSize - PacketHeader.HeaderSize)
+                {
+                    Console.WriteLine("Client packet dropped because buffer size is too small for unpacked header.");
                     return false;
+                }
 
                 Data = new MemoryStream(buffer, PacketHeader.HeaderSize, Header.Size, false, true);
                 DataReader = new BinaryReader(Data);
                 HeaderOptional.Unpack(DataReader, Header);
 
                 if (!HeaderOptional.IsValid)
+                {
+                    Console.WriteLine(Convert.ToHexString(buffer.AsSpan(0, 24)));
+                    Console.WriteLine("Client packet dropped because header is invalid.");
                     return false;
+                }
 
                 if (!ReadFragments())
+                {
+                    Console.WriteLine(Convert.ToHexString(buffer.AsSpan(0, 24)));
+                    Console.WriteLine("Client packet dropped because unpacked fragments are invalid.");
                     return false;
+                }
 
                 return true;
             }
             catch (Exception ex)
             {
                 packetLog.Error("Invalid packet data", ex);
+                Console.WriteLine("Invalid packet data" + ex);
 
                 return false;
             }
@@ -64,8 +79,9 @@ namespace ACE.Server.Network
 
                         Fragments.Add(fragment);
                     }
-                    catch (Exception)
+                    catch (Exception e)
                     {
+                        Console.WriteLine(e);
                         // corrupt packet
                         return false;
                     }
