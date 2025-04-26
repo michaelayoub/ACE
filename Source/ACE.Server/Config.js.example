@@ -230,5 +230,12 @@
 
     // Upon server startup, precache all DAT files that would be sent as compressed data
     "PrecacheCompressedDATFiles": false
+  },
+  "Redis": {
+    "Host": "127.0.0.1:6379"
+  },
+  "TerminalCoffee": {
+      "ApiHost": "https://api.dev.terminal.shop",
+      "ApiKey": "<token>"
   }
 }

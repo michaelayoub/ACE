@@ -9,5 +9,9 @@ namespace ACE.Common
         public OfflineConfiguration Offline { get; set; } = new OfflineConfiguration();
 
         public DDDConfiguration DDD { get; set; } = new DDDConfiguration();
+
+        public RedisConfiguration Redis { get; set; } = new RedisConfiguration();
+
+        public TerminalCoffeeConfiguration TerminalCoffee { get; set; } = new TerminalCoffeeConfiguration();
     }
 }
