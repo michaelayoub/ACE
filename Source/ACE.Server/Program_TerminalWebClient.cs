@@ -1,5 +1,6 @@
 using System;
 using System.Net.Http;
+using System.Net.Http.Json;
 using System.Text.Json;
 using System.Threading.Tasks;
 using ACE.Common;
@@ -39,6 +40,18 @@ public class TerminalWebClient: IDisposable
 
         var jsonString = await response.Content.ReadAsStringAsync();
         return JsonSerializer.Deserialize<TResponse>(jsonString);
+    }
+
+    public async Task<TResponse> PostAsync<TResponse, TBody>(string uri, string token, TBody body)
+    {
+        using var client = new HttpClient();
+        client.BaseAddress = httpClient.BaseAddress;
+        client.DefaultRequestHeaders.Add("Authorization", $"Bearer {token}");
+
+        var response = await httpClient.PostAsJsonAsync(uri, body);
+        response.EnsureSuccessStatusCode();
+
+        return await response.Content.ReadFromJsonAsync<TResponse>();
     }
 
     public void Dispose()

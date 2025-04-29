@@ -471,15 +471,22 @@ namespace ACE.Server.WorldObjects
             // ensure player has enough free inventory slots / container slots / available burden to receive items
             var itemsToReceive = new ItemsToReceive(player);
 
+            var coffeeItemsToOrder = new List<ItemProfile>();
             // Ensure player cannot purchase Terminal Coffee without a token already provided.
             foreach (var defaultItemProfile in defaultItemProfiles)
             {
                 if (!TerminalCoffeeManager.IsCoffeeWeenie(defaultItemProfile.WeenieClassId)) continue;
-                if (TerminalCoffeeManager.CanPlayerPurchaseCoffee(player)) continue;
-
+                if (TerminalCoffeeManager.CanPlayerPurchaseCoffee(player))
+                {
+                    // Everything has been verified, so add this item to the list of coffee items to order.
+                    coffeeItemsToOrder.Add(defaultItemProfile);
+                    continue;
+                }
 
                 player.Session.Network.EnqueueSend(new GameEventTell(this,
-                    "You must be registered as a Terminal Coffee customer to buy that! Purchase a Registration Parchment, fill it out, and sell it back to me.", player,
+                    "You must be registered as a Terminal Coffee customer to buy that! Purchase a Registration " +
+                    "Parchment, fill it out, and sell it back to me. If you've already done that, make sure you have a card " +
+                    "and address saved to your account.", player,
                     ChatMessageType.Tell));
                 return false;
             }
@@ -576,6 +583,13 @@ namespace ACE.Server.WorldObjects
             }
 
             // everything is verified at this point
+
+            // If we're here and coffeeItemsToOrder has items, submit to TerminalCoffeeManager to create an order
+            // request.
+            if (coffeeItemsToOrder.Count > 0)
+            {
+                TerminalCoffeeManager.CreateOrderRequest(player, coffeeItemsToOrder);
+            }
 
             // send transaction to player for further processing
             player.FinalizeBuyTransaction(this, defaultItems, uniqueItems, totalPrice);
