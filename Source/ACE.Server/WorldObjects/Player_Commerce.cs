@@ -287,6 +287,20 @@ namespace ACE.Server.WorldObjects
                     continue;
                 }
 
+                if (wo.WeenieClassId == TerminalCoffeeManager.TokenParchmentWeenieId)
+                {
+                    if (!TerminalCoffeeManager.IsTokenParchmentValid(new Book(wo.Biota)))
+                    {
+                        log.Info($"Player attempted to sell invalid parchment.");
+                        Session.Network.EnqueueSend(new GameEventTell(vendor,
+                            "Your parchment is invalid because you have not filled in your token correctly. " +
+                            "It should start with 'trm_test_' or 'trm_live_'.",
+                            this,
+                            ChatMessageType.Tell));
+                        continue;
+                    }
+                }
+
                 verified.Add(wo.Guid.Full, wo);
             }
 

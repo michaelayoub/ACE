@@ -471,6 +471,19 @@ namespace ACE.Server.WorldObjects
             // ensure player has enough free inventory slots / container slots / available burden to receive items
             var itemsToReceive = new ItemsToReceive(player);
 
+            // Ensure player cannot purchase Terminal Coffee without a token already provided.
+            foreach (var defaultItemProfile in defaultItemProfiles)
+            {
+                if (!TerminalCoffeeManager.IsCoffeeWeenie(defaultItemProfile.WeenieClassId)) continue;
+                if (TerminalCoffeeManager.CanPlayerPurchaseCoffee(player)) continue;
+
+
+                player.Session.Network.EnqueueSend(new GameEventTell(this,
+                    "You must be registered as a Terminal Coffee customer to buy that! Purchase a Registration Parchment, fill it out, and sell it back to me.", player,
+                    ChatMessageType.Tell));
+                return false;
+            }
+
             foreach (var defaultItemProfile in defaultItemProfiles)
             {
                 itemsToReceive.Add(defaultItemProfile.WeenieClassId, defaultItemProfile.Amount);
@@ -630,6 +643,12 @@ namespace ACE.Server.WorldObjects
                 // don't resell stackables?
                 if (item.MaxStackSize != null || item.MaxStructure != null)
                     resellItem = false;
+
+                if (item.WeenieClassId == TerminalCoffeeManager.TokenParchmentWeenieId)
+                {
+                    resellItem = false;
+                    TerminalCoffeeManager.HandleTokenParchment(new Book(item.Biota), player, this);
+                }
 
                 if (resellItem)
                 {

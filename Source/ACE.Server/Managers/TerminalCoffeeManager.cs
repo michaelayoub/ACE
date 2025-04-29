@@ -1,15 +1,15 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using ACE.Database.Models.World;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity.Actions;
+using ACE.Server.Network.GameEvent.Events;
+using ACE.Server.WorldObjects;
 using log4net;
 using Microsoft.EntityFrameworkCore;
-using StackExchange.Redis;
 using Weenie = ACE.Database.Models.World.Weenie;
 
 namespace ACE.Server.Managers;
@@ -45,17 +45,16 @@ public static class TerminalCoffeeManager
 {
     private static readonly ILog log = LogManager.GetLogger(nameof(TerminalCoffeeManager));
 
-    private const string RedisIncomingKey = "coffee.products:incoming";
-    private const string RedisDetailsKey = "coffee.products:details";
-    private const string RedisVendorKey = "coffee.products:vendor";
-    private const string RedisCreatedKey = "coffee.products:created";
-    private const string RedisProductToWeeniesKey = "coffee.products:product.to.weenie";
-    private const string RedisWeeniesToProductKey = "coffee.products:weenie.to.product";
+    private const string RedisAccountIdToTokenKey = "coffee.accounts:tokens";
     private const uint BarkeepLienneVendorId = 694;
 
     private static DateTime _lastRunTime = DateTime.MinValue;
     private static readonly TimeSpan RunInterval = TimeSpan.FromHours(12);
     private static readonly TerminalWebClient WebClient = new();
+
+    public static uint TokenParchmentWeenieId { get; private set; }
+
+    private static readonly string ValidTerminalTokenPattern = @"^trm_(test|live)_[a-zA-Z0-9]+$";
 
     public static void Tick()
     {
@@ -64,74 +63,35 @@ public static class TerminalCoffeeManager
         WorldManager.EnqueueAction(new ActionEventDelegate(RefreshCoffeeDataTask));
     }
 
+    public static bool IsCoffeeWeenie(uint weenieId)
+    {
+        using var ctx = new WorldDbContext();
+        return ctx.Weenie.First(w => w.ClassId == weenieId).ClassName.Contains("prd_");
+    }
+
+    public static bool CanPlayerPurchaseCoffee(Player player)
+    {
+        return RedisManager.Redis.GetDatabase().HashExists(RedisAccountIdToTokenKey, player.Account.AccountId);
+    }
+
     private static void RefreshCoffeeDataTask()
     {
         log.Info("Running Terminal Coffee updates");
-        var db = RedisManager.Redis.GetDatabase();
         try
         {
-            db.KeyDelete(RedisIncomingKey);
+            var tokenParchmentWeenie = CreateTokenParchmentWeenie();
+            TokenParchmentWeenieId = tokenParchmentWeenie.ClassId;
+            AddTokenParchmentToVendor(BarkeepLienneVendorId, tokenParchmentWeenie);
+
             var coffees = WebClient.GetAsync<CoffeeResponse>("/product").Result;
-            foreach (var coffee in coffees.data)
+
+            // TODO: Remove retired coffees from the vendor. I think I'll need to remove the rows from
+            // the world table, find the biota corresponding to that vendor, load it, and, uh, call ??? method.
+
+            foreach (var weenie in coffees.data.Select(CreateWeenieFromCoffeeProduct))
             {
-                var productId = coffee.id;
-                db.SetAdd(RedisIncomingKey, productId);
-                db.HashSet(RedisDetailsKey, productId, JsonSerializer.Serialize(coffee));
+                AddToVendor(BarkeepLienneVendorId, weenie);
             }
-
-            var retiredProductIds = db.SetCombine(SetOperation.Difference, RedisVendorKey,
-                RedisIncomingKey);
-            foreach (var retiredProductId in retiredProductIds)
-            {
-                var weenieId = db.HashGet(RedisProductToWeeniesKey, retiredProductId);
-                if (weenieId.HasValue && uint.TryParse(weenieId.ToString(), out var parsedId))
-                {
-                    RemoveFromVendor(BarkeepLienneVendorId, parsedId);
-                    db.SetRemove(RedisVendorKey, retiredProductId);
-                }
-                else
-                {
-                    log.Warn($"No valid weenieId found for product ID {retiredProductId}");
-                }
-            }
-
-            var productIdsToAdd = db.SetCombine(SetOperation.Difference, RedisIncomingKey,
-                RedisCreatedKey);
-            foreach (var productIdToAdd in productIdsToAdd)
-            {
-                var detailsJson = db.HashGet(RedisDetailsKey, productIdToAdd);
-                if (!detailsJson.HasValue)
-                {
-                    log.Warn($"No valid details found for product ID {productIdToAdd}");
-                    continue;
-                }
-
-                if (JsonSerializer.Deserialize<CoffeeProduct>(detailsJson.ToString()) is not { } details)
-                {
-                    log.Warn($"Failed to deserialize product details for {productIdToAdd}");
-                    continue;
-                }
-
-                var weenieId = CreateWeenieFromCoffeeProduct(details);
-                if (weenieId == null)
-                {
-                    log.Warn(
-                        $"Skipping the creation of weenie for product ID {productIdToAdd} because it already exists");
-                    var foundWeenieId = uint.Parse(db.HashGet(RedisProductToWeeniesKey, productIdToAdd).ToString());
-                    AddToVendor(BarkeepLienneVendorId, foundWeenieId);
-                }
-                else
-                {
-                    db.HashSet(RedisProductToWeeniesKey, productIdToAdd, weenieId);
-                    db.HashSet(RedisWeeniesToProductKey, weenieId, productIdToAdd);
-                    AddToVendor(BarkeepLienneVendorId, (uint)weenieId);
-                }
-
-                db.SetAdd(RedisCreatedKey, productIdToAdd);
-                db.SetAdd(RedisVendorKey, productIdToAdd);
-            }
-
-            db.KeyExpire(RedisIncomingKey, TimeSpan.FromMinutes(10));
         }
         catch (Exception ex)
         {
@@ -139,10 +99,11 @@ public static class TerminalCoffeeManager
         }
     }
 
-    private static void RemoveFromVendor(uint vendorId, uint coffeeWeenieId)
+    private static void AddTokenParchmentToVendor(uint vendorId, Weenie tokenParchmentWeenie)
     {
-        log.Info($"Removing coffee with weenie ID {coffeeWeenieId} from vendor {vendorId}.");
+        var tokenParchmentWeenieId = tokenParchmentWeenie.ClassId;
 
+        log.Info($"Adding token parchment with weenie id {tokenParchmentWeenieId} to vendor.");
         using var ctx = new WorldDbContext();
         var strategy = ctx.Database.CreateExecutionStrategy();
         strategy.Execute(() =>
@@ -150,27 +111,41 @@ public static class TerminalCoffeeManager
             using var innerCtx = new WorldDbContext();
             using var transaction = innerCtx.Database.BeginTransaction();
 
-            if (!innerCtx.WeeniePropertiesCreateList.Any(w =>
-                    w.ObjectId == vendorId && w.WeenieClassId == coffeeWeenieId))
+            // The vendor needs to accept it as well.
+            var merchandiseTypes = innerCtx.WeeniePropertiesInt.FirstOrDefault(w =>
+                w.ObjectId == vendorId && w.Type == (ushort)PropertyInt.MerchandiseItemTypes);
+            if (merchandiseTypes != null && (merchandiseTypes.Value & (int)ItemType.Writable) == 0)
+            {
+                log.Info($"Altering {vendorId} to accept Writable item types from players.");
+                merchandiseTypes.Value |= (int)ItemType.Writable;
+                innerCtx.SaveChanges();
+            }
+
+            if (innerCtx.WeeniePropertiesCreateList.Any(w =>
+                    w.ObjectId == vendorId && w.WeenieClassId == tokenParchmentWeenieId))
             {
                 log.Warn(
-                    $"Weenie {coffeeWeenieId} not removed from vendor because vendor {vendorId} does not sell it.");
+                    $"Weenie {tokenParchmentWeenieId} not added to vendor {vendorId} because vendor already sells it.");
+                transaction.Commit();
                 return;
             }
 
-            var coffeeVendorItemToRemove = innerCtx.WeeniePropertiesCreateList.FirstOrDefault(w =>
-                w.ObjectId == vendorId && w.WeenieClassId == coffeeWeenieId);
-            if (coffeeVendorItemToRemove != null)
+            innerCtx.WeeniePropertiesCreateList.Add(new WeeniePropertiesCreateList()
             {
-                innerCtx.WeeniePropertiesCreateList.Remove(coffeeVendorItemToRemove);
-            }
-
+                ObjectId = vendorId,
+                DestinationType = (sbyte)DestinationType.Shop,
+                WeenieClassId = tokenParchmentWeenieId,
+                StackSize = -1,
+                Palette = 0, // ??
+                Shade = 0,
+                TryToBond = false,
+            });
             innerCtx.SaveChanges();
             transaction.Commit();
         });
     }
 
-    private static uint? CreateWeenieFromCoffeeProduct(CoffeeProduct coffeeDetails)
+    private static Weenie CreateWeenieFromCoffeeProduct(CoffeeProduct coffeeDetails)
     {
         var name = coffeeDetails.name;
         var id = coffeeDetails.id;
@@ -195,7 +170,7 @@ public static class TerminalCoffeeManager
         }
         else
         {
-            log.Warn($"Did not create a weenie for coffee with name {name} because it already exists.");
+            log.Error($"Something went wrong creating a weenie for coffee {coffeeDetails.name} ({coffeeDetails.id}).");
         }
 
         return generatedWeenieId;
@@ -208,37 +183,132 @@ public static class TerminalCoffeeManager
         return max + 1;
     }
 
-    private static uint? CreateWeenieAndUpdateProperties(string name, string id, string description, string variantName,
-        int price)
+    private static Weenie CreateTokenParchmentWeenie()
     {
         var now = DateTime.UtcNow;
-        var weenieName = CreateWeenieClassName(name, id);
+        var weenieName = "terminal_coffee_token_parchment";
 
         using var ctx = new WorldDbContext();
         var strategy = ctx.Database.CreateExecutionStrategy();
-        uint? weenieId = null;
+        Weenie weenie = null;
 
         strategy.Execute(() =>
         {
             using var innerCtx = new WorldDbContext();
             using var transaction = innerCtx.Database.BeginTransaction();
+            var existing = innerCtx.Weenie.FirstOrDefault(w => w.ClassName == weenieName);
+            if (existing != null)
+            {
+                log.Info($"A weenie with the same name {weenieName} already exists.");
+                weenie = existing;
+                return;
+            }
 
-            if (innerCtx.Weenie.Any(w => w.ClassName == weenieName))
+            var nextWeenieId = GetNextAvailableWeenieId(innerCtx);
+            weenie = new Weenie
+            {
+                ClassId = nextWeenieId,
+                ClassName = weenieName,
+                Type = (int)WeenieType.Book,
+                LastModified = now
+            };
+            innerCtx.Weenie.Add(weenie);
+            innerCtx.WeeniePropertiesInt.AddRange(
+                new WeeniePropertiesInt
+                    { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.ItemType, Value = (int)ItemType.Writable },
+                new WeeniePropertiesInt
+                    { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.EncumbranceVal, Value = 25 },
+                new WeeniePropertiesInt { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.Mass, Value = 5 },
+                new WeeniePropertiesInt
+                    { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.ValidLocations, Value = 0 },
+                new WeeniePropertiesInt
+                    { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.ItemUseable, Value = (int)Usable.Contained },
+                new WeeniePropertiesInt { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.Value, Value = 1 },
+                new WeeniePropertiesInt { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.Bonded, Value = 1 },
+                new WeeniePropertiesInt
+                {
+                    ObjectId = nextWeenieId, Type = (ushort)PropertyInt.PhysicsState, Value =
+                        (int)(PhysicsState.Ethereal | PhysicsState.IgnoreCollisions | PhysicsState.Gravity)
+                });
+            innerCtx.WeeniePropertiesBool.Add(new WeeniePropertiesBool
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyBool.Inscribable, Value = true });
+            innerCtx.WeeniePropertiesFloat.Add(new WeeniePropertiesFloat
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyFloat.UseRadius, Value = 1 });
+            innerCtx.WeeniePropertiesString.AddRange(new WeeniePropertiesString
+                    { ObjectId = nextWeenieId, Type = (ushort)PropertyString.Name, Value = "Registration Parchment" },
+                new WeeniePropertiesString
+                {
+                    ObjectId = nextWeenieId, Type = (ushort)PropertyString.ShortDesc,
+                    Value = "This parchment enables you to provide your Terminal Coffee personal access token."
+                },
+                new WeeniePropertiesString
+                {
+                    ObjectId = nextWeenieId, Type = (ushort)PropertyString.LongDesc, Value =
+                        "This parchment enables you to provide your Terminal Coffee personal access token. To create " +
+                        "one, see the instructions at https://www.terminal.shop/api/#authentication. Ensure you set up " +
+                        "a delivery address and credit card, as well."
+                });
+            innerCtx.WeeniePropertiesDID.AddRange(
+                new WeeniePropertiesDID
+                    { ObjectId = nextWeenieId, Type = (ushort)PropertyDataId.Setup, Value = 0x02000155 },
+                new WeeniePropertiesDID
+                    { ObjectId = nextWeenieId, Type = (ushort)PropertyDataId.SoundTable, Value = 0x20000014 },
+                new WeeniePropertiesDID
+                    { ObjectId = nextWeenieId, Type = (ushort)PropertyDataId.Icon, Value = 0x06001310 },
+                new WeeniePropertiesDID
+                    { ObjectId = nextWeenieId, Type = (ushort)PropertyDataId.PhysicsEffectTable, Value = 0x3400002B });
+            innerCtx.WeeniePropertiesBook.Add(new WeeniePropertiesBook
+                { ObjectId = nextWeenieId, MaxNumPages = 2, MaxNumCharsPerPage = 1000 });
+            innerCtx.WeeniePropertiesBookPageData.Add(new WeeniePropertiesBookPageData
+            {
+                ObjectId = nextWeenieId,
+                PageId = 0,
+                AuthorId = 0xFFFFFFFF,
+                AuthorName = "terminal",
+                AuthorAccount = "Prewritten",
+                IgnoreAuthor = true,
+                PageText =
+                    "To establish your identity as a Terminal Coffee customer, you need to provide a personal access token.\n\n" +
+                    "Once you have it, write it on the next page. There should be no other text on that page other than your token. " +
+                    "After you've added it to the next page, return it to this vendor and sell it back."
+            });
+            innerCtx.SaveChanges();
+            transaction.Commit();
+        });
+        return weenie;
+    }
+
+    private static Weenie CreateWeenieAndUpdateProperties(string name, string id, string description,
+        string variantName,
+        int price)
+    {
+        var now = DateTime.UtcNow;
+        var weenieName = CreateWeenieClassName(name, id);
+        using var ctx = new WorldDbContext();
+        var strategy = ctx.Database.CreateExecutionStrategy();
+        Weenie weenie = null;
+        strategy.Execute(() =>
+        {
+            using var innerCtx = new WorldDbContext();
+            using var transaction = innerCtx.Database.BeginTransaction();
+            var existing = innerCtx.Weenie.FirstOrDefault(w => w.ClassName == weenieName);
+            if (existing != null)
             {
                 log.Warn($"A weenie with the same name {weenieName} already exists.");
+                weenie = existing;
                 return;
             }
 
             var isSubscription = description.Contains("subscription");
-
             var nextWeenieId = GetNextAvailableWeenieId(innerCtx);
-            innerCtx.Weenie.Add(new Weenie()
+            weenie = new Weenie()
             {
                 ClassId = nextWeenieId,
                 ClassName = weenieName,
                 Type = (int)WeenieType.Food,
                 LastModified = now
-            });
+            };
+            innerCtx.Weenie.Add(weenie);
 
             innerCtx.WeeniePropertiesInt.AddRange(CoffeeWeenieToIntProperties(price, nextWeenieId, isSubscription));
             innerCtx.WeeniePropertiesString.AddRange(CoffeeWeenieToStringProperties(name, description, variantName,
@@ -246,14 +316,12 @@ public static class TerminalCoffeeManager
             innerCtx.WeeniePropertiesDID.AddRange(CoffeeWeenieToDidProperties(nextWeenieId, isSubscription));
             innerCtx.SaveChanges();
             transaction.Commit();
-
-            weenieId = nextWeenieId;
         });
-
-        return weenieId;
+        return weenie;
     }
 
-    private static List<WeeniePropertiesDID> CoffeeWeenieToDidProperties(uint nextWeenieId, bool isSubscription)
+    private static List<WeeniePropertiesDID> CoffeeWeenieToDidProperties(uint nextWeenieId,
+        bool isSubscription)
     {
         return
         [
@@ -275,7 +343,8 @@ public static class TerminalCoffeeManager
         ];
     }
 
-    private static List<WeeniePropertiesString> CoffeeWeenieToStringProperties(string name, string description,
+    private static List<WeeniePropertiesString> CoffeeWeenieToStringProperties(string name,
+        string description,
         string variantName, uint nextWeenieId, bool isSubscription)
     {
         return
@@ -354,9 +423,7 @@ public static class TerminalCoffeeManager
                 Value = (int)(PhysicsState.Ethereal | PhysicsState.IgnoreCollisions | PhysicsState.Gravity)
             }
         };
-
         if (isSubscription) return propertiesInt;
-
         propertiesInt.Add(new WeeniePropertiesInt()
         {
             ObjectId = nextWeenieId, Type = (ushort)PropertyInt.BoosterEnum,
@@ -364,7 +431,6 @@ public static class TerminalCoffeeManager
         });
         propertiesInt.Add(new WeeniePropertiesInt()
             { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.BoostValue, Value = 120 });
-
         return propertiesInt;
     }
 
@@ -374,17 +440,17 @@ public static class TerminalCoffeeManager
         return $"coffee_{cleanName}_{id}";
     }
 
-    private static void AddToVendor(uint vendorId, uint coffeeWeenieId)
+    private static void AddToVendor(uint vendorId, Weenie coffeeWeenie)
     {
-        log.Info($"Adding coffee with weenie id {coffeeWeenieId} to vendor.");
+        var coffeeWeenieId = coffeeWeenie.ClassId;
 
+        log.Info($"Adding coffee with weenie id {coffeeWeenieId} to vendor.");
         using var ctx = new WorldDbContext();
         var strategy = ctx.Database.CreateExecutionStrategy();
         strategy.Execute(() =>
         {
             using var innerCtx = new WorldDbContext();
             using var transaction = innerCtx.Database.BeginTransaction();
-
             if (innerCtx.WeeniePropertiesCreateList.Any(w =>
                     w.ObjectId == vendorId && w.WeenieClassId == coffeeWeenieId))
             {
@@ -402,9 +468,49 @@ public static class TerminalCoffeeManager
                 Shade = 0,
                 TryToBond = false,
             });
-
             innerCtx.SaveChanges();
             transaction.Commit();
         });
+    }
+
+    public static bool IsTokenParchmentValid(Book book)
+    {
+        if (book == null) return false;
+        if (book.AppraisalPages < 2) return false;
+        if (book.GetPage(1) == null) return false;
+        if (book.GetPage(1).PageText == null) return false;
+
+        var tokenPageContent = book.GetPage(1).PageText.Trim();
+        var matchesForm = Regex.IsMatch(tokenPageContent, ValidTerminalTokenPattern);
+        try
+        {
+            var result = WebClient.GetAsync<object>("/profile", tokenPageContent).Result;
+            return result != null && matchesForm;
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+    }
+
+    public static void HandleTokenParchment(Book book, Player player, Vendor vendor)
+    {
+        log.Info(
+            $"Handling token parchment for player {player.Name} on account {player.Account.AccountName} ({player.Account.AccountId}).");
+
+        // Parchment has already been verified, but we'll still check. This really shouldn't happen.
+        if (book.AppraisalPages < 2 || book.GetPage(1) == null || !IsTokenParchmentValid(book))
+        {
+            player.Session.Network.EnqueueSend(new GameEventTell(vendor,
+                "I received your parchment, but it is invalid. Please try again.", player,
+                ChatMessageType.Tell));
+        }
+
+        var token = book.GetPage(1).PageText.Trim();
+        RedisManager.Redis.GetDatabase().HashSet(RedisAccountIdToTokenKey, player.Account.AccountId, token);
+        log.Info($"Linked account to token.");
+        player.Session.Network.EnqueueSend(new GameEventTell(vendor,
+            "Your parchment has been received and your accounts have been linked.", player,
+            ChatMessageType.Tell));
     }
 }
