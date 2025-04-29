@@ -26,7 +26,8 @@ Global
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {A71CC3F6-2E57-4E48-9BE4-05D9BD5D00F2}
 	EndGlobalSection
-EndGlobal</Platforms>
+EndGlobal;AnyCPU</Platforms>
+    <Configurations>Debug;Release</Configurations>
   </PropertyGroup>
 
   <PropertyGroup>

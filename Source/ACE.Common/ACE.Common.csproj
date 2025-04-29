@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <TargetFramework>netstandard2.0</TargetFramework>
-    <Platforms>osx-arm64</Platforms>
+    <Platforms>osx-arm64;AnyCPU</Platforms>
     <Authors>ACEmulator Contributors</Authors>
     <RepositoryType>git</RepositoryType>
     <RepositoryUrl>https://github.com/ACEmulator/ACE</RepositoryUrl>
@@ -12,6 +12,7 @@
     <Description>Asheron's Call server emulator</Description>
     <Company>ACEmulator</Company>
     <Version>1.0.0</Version>
+    <Configurations>Debug;Release</Configurations>
   </PropertyGroup>
 
   <ItemGroup>
