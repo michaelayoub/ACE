@@ -28,6 +28,9 @@ public static class TerminalCoffeeManager
     private const uint BarkeepLienneVendorId = 694;
     private const string BarkeepLienneName = "Barkeep Lienne";
     private const string ValidTerminalTokenPattern = @"^trm_(test|live)_[a-zA-Z0-9]+$";
+    private const uint HeavyGrinderWeenieId = 7823;
+    private const uint FullBrewKettleWeenieId = 29201;
+    private const uint BrewedCoffeeWeenieId = 2454;
 
     private static DateTime _lastCoffeeUpdateTime = DateTime.MinValue;
     private static DateTime _lastOrderStatusCheckTime = DateTime.MinValue;
@@ -237,12 +240,12 @@ public static class TerminalCoffeeManager
             var nextWeenieId = GetNextAvailableWeenieId(innerCtx);
 
             var targetTypes = innerCtx.WeeniePropertiesInt.FirstOrDefault(w =>
-                w.ObjectId == 29201 /* Full Brew Kettle */ && w.Type == (ushort)PropertyInt.TargetType);
+                w.ObjectId == FullBrewKettleWeenieId && w.Type == (ushort)PropertyInt.TargetType);
             if (targetTypes == null)
             {
                 innerCtx.WeeniePropertiesInt.Add(new WeeniePropertiesInt
                 {
-                    ObjectId = 29201 /* Full Brew Kettle */,
+                    ObjectId = FullBrewKettleWeenieId,
                     Type = (ushort)PropertyInt.TargetType,
                     Value = (int)ItemType.Food
                 });
@@ -313,7 +316,7 @@ public static class TerminalCoffeeManager
                     Skill = (uint)Skill.Cooking,
                     Difficulty = 1,
                     SalvageType = 0,
-                    SuccessWCID = 2454 /* Coffee */,
+                    SuccessWCID = BrewedCoffeeWeenieId,
                     SuccessAmount = 1,
                     SuccessMessage = $"You brew the {coffeeName} dose.",
                     FailWCID = 0,
@@ -338,7 +341,7 @@ public static class TerminalCoffeeManager
                 innerCtx.CookBook.Add(new CookBook
                 {
                     RecipeId = nextWeenieId,
-                    SourceWCID = 7823, /* Heavy Grinder */
+                    SourceWCID = HeavyGrinderWeenieId,
                     TargetWCID = whole.ClassId,
                     LastModified = DateTime.Now
                 });
@@ -346,7 +349,7 @@ public static class TerminalCoffeeManager
                 innerCtx.CookBook.Add(new CookBook
                 {
                     RecipeId = nextWeenieId + 1,
-                    SourceWCID = 29201, /* Full Brew Kettle */
+                    SourceWCID = FullBrewKettleWeenieId,
                     TargetWCID = ground.ClassId,
                     LastModified = DateTime.Now
                 });
