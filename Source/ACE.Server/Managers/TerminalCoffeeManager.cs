@@ -169,6 +169,12 @@ public static class TerminalCoffeeManager
             Log.Info($"Successful order: {success.ToString()}");
             var successJob = JsonSerializer.Deserialize<OrderSuccess>(success.ToString());
             var player = PlayerManager.GetOnlinePlayer(successJob.for_player_id);
+
+            // Ideally, persist the message to tell the player the next time they're online.
+            // I could put it back on the Success list, but then it would block messages from
+            // other players (as if).
+            if (player == null) return;
+
             player.Session.Network.EnqueueSend(new GameEventTell(player.Session,
                 $"Your order {successJob.order_id} was successful!",
                 BarkeepLienneName,
@@ -236,8 +242,6 @@ public static class TerminalCoffeeManager
         {
             using var innerCtx = new WorldDbContext();
             using var transaction = innerCtx.Database.BeginTransaction();
-            // Using this for recipe ids, too.
-            var nextWeenieId = GetNextAvailableWeenieId(innerCtx);
 
             var targetTypes = innerCtx.WeeniePropertiesInt.FirstOrDefault(w =>
                 w.ObjectId == FullBrewKettleWeenieId && w.Type == (ushort)PropertyInt.TargetType);
@@ -256,6 +260,9 @@ public static class TerminalCoffeeManager
             }
 
             innerCtx.SaveChanges();
+            var nextRecipeId = innerCtx.Recipe.Any()
+                ? innerCtx.Recipe.Max(r => r.Id) + 1
+                : 1;
 
             foreach (var kv in wholeAndGround)
             {
@@ -275,11 +282,14 @@ public static class TerminalCoffeeManager
                 var coffeeName = match.Groups["name"].Value;
                 var size = int.Parse(match.Groups["size"].Value);
 
+                var grindRecipeId = nextRecipeId;
+                var brewRecipeId = nextRecipeId + 1;
+
                 Log.Info($"Creating recipe for grinding {whole.ClassId} into {ground.ClassId}");
 
                 innerCtx.Recipe.Add(new Recipe
                 {
-                    Id = nextWeenieId,
+                    Id = grindRecipeId,
                     Unknown1 = 0,
                     Skill = (uint)Skill.Cooking,
                     Difficulty = 1,
@@ -311,7 +321,7 @@ public static class TerminalCoffeeManager
 
                 innerCtx.Recipe.Add(new Recipe
                 {
-                    Id = nextWeenieId + 1,
+                    Id = brewRecipeId,
                     Unknown1 = 0,
                     Skill = (uint)Skill.Cooking,
                     Difficulty = 1,
@@ -340,7 +350,7 @@ public static class TerminalCoffeeManager
 
                 innerCtx.CookBook.Add(new CookBook
                 {
-                    RecipeId = nextWeenieId,
+                    RecipeId = grindRecipeId,
                     SourceWCID = HeavyGrinderWeenieId,
                     TargetWCID = whole.ClassId,
                     LastModified = DateTime.Now
@@ -348,12 +358,13 @@ public static class TerminalCoffeeManager
 
                 innerCtx.CookBook.Add(new CookBook
                 {
-                    RecipeId = nextWeenieId + 1,
+                    RecipeId = brewRecipeId,
                     SourceWCID = FullBrewKettleWeenieId,
                     TargetWCID = ground.ClassId,
                     LastModified = DateTime.Now
                 });
-                nextWeenieId += 2;
+
+                nextRecipeId += 2;
             }
 
             innerCtx.SaveChanges();
