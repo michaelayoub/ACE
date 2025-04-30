@@ -16,82 +16,9 @@ using Weenie = ACE.Database.Models.World.Weenie;
 
 namespace ACE.Server.Managers;
 
-public class CreateOrderJob
-{
-    public CreateOrderRequest payload { get; set; }
-    public Guid id { get; set; }
-    public string type { get; set; }
-    public int retries { get; set; }
-    public DateTime next_attempt { get; set; }
-
-    public static CreateOrderJob FromPayload(CreateOrderRequest payload)
-    {
-        return new CreateOrderJob
-        {
-            payload = payload,
-            id = Guid.NewGuid(),
-            type = "create_order",
-            retries = 0,
-            next_attempt = DateTime.MinValue
-        };
-    }
-}
-
-public class CreateOrderRequest
-{
-    public string cardID { get; set; }
-    public string addressID { get; set; }
-    public Dictionary<string, int> variants { get; set; }
-}
-
-public class CreateOrderResponse200
-{
-    public string data { get; set; }
-}
-
-public class AddressResponse
-{
-    public List<Address> data { get; set; }
-}
-
-public class Address
-{
-    public string id { get; set; }
-}
-
-public class CardResponse
-{
-    public List<Card> data { get; set; }
-}
-
-public class Card
-{
-    public string id { get; set; }
-}
-
-public class CoffeeResponse
-{
-    public List<CoffeeProduct> data { get; set; }
-}
-
-public class CoffeeProduct
-{
-    public string id { get; set; }
-    public string name { get; set; }
-    public string description { get; set; }
-    public List<Variant> variants { get; set; }
-}
-
-public class Variant
-{
-    public string id { get; set; }
-    public string name { get; set; }
-    public int price { get; set; }
-}
-
 public static class TerminalCoffeeManager
 {
-    private static readonly ILog log = LogManager.GetLogger(nameof(TerminalCoffeeManager));
+    private static readonly ILog Log = LogManager.GetLogger(nameof(TerminalCoffeeManager));
 
     private const string RedisAccountIdToTokenKey = "coffee.accounts:tokens";
     private const string RedisTokenHasCardAndAddressKey = "coffee.accounts:token.is_ready";
@@ -99,13 +26,15 @@ public static class TerminalCoffeeManager
     private const string RedisOrderSuccessKey = "coffee.orders:success";
     private const string RedisOrderFailureKey = "coffee.orders:failure";
     private const uint BarkeepLienneVendorId = 694;
+    private const string BarkeepLienneName = "Barkeep Lienne";
     private const string ValidTerminalTokenPattern = @"^trm_(test|live)_[a-zA-Z0-9]+$";
 
     private static DateTime _lastCoffeeUpdateTime = DateTime.MinValue;
     private static DateTime _lastOrderStatusCheckTime = DateTime.MinValue;
 
+
     private static readonly TimeSpan CoffeeUpdateInterval = TimeSpan.FromHours(12);
-    private static readonly TimeSpan OrderStatusCheckInterval = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan OrderStatusCheckInterval = TimeSpan.FromSeconds(10);
 
     private static readonly TerminalWebClient WebClient = new();
 
@@ -120,7 +49,7 @@ public static class TerminalCoffeeManager
     public static void CreateOrderRequest(Player player, List<ItemProfile> coffeeItemsToOrder)
     {
         var db = RedisManager.Redis.GetDatabase();
-        var token = db.HashGet(RedisAccountIdToTokenKey, player.Account.AccountId);
+        var token = db.HashGet(RedisAccountIdToTokenKey, player.Account.AccountId).ToString();
         var addressList = WebClient.GetAsync<AddressResponse>("/address", token).Result;
         var cardList = WebClient.GetAsync<CardResponse>("/card", token).Result;
 
@@ -137,11 +66,11 @@ public static class TerminalCoffeeManager
                 item => item.Amount
             )
         };
-        var job = CreateOrderJob.FromPayload(body);
+        var job = CreateOrderJob.FromPayload(body, token, player.Biota.Id);
 
         var json = JsonSerializer.Serialize(job);
         db.ListLeftPush(RedisOrderRequestKey, json);
-        log.Info($"Sent order to queue: {json}");
+        Log.Info($"Sent order to queue: {json}");
     }
 
     public static bool CanPlayerPurchaseCoffee(Player player)
@@ -167,13 +96,13 @@ public static class TerminalCoffeeManager
             var result = WebClient.GetAsync<object>("/profile", tokenPageContent).Result;
             return result != null && matchesForm;
         }
-        catch (Exception e)
+        catch (Exception)
         {
             return false;
         }
     }
 
-    public static bool DoesCustomerHaveAddressAndCard(string token)
+    private static bool DoesCustomerHaveAddressAndCard(string token)
     {
         var db = RedisManager.Redis.GetDatabase();
         var tokenIsReady = db.StringGet($"{RedisTokenHasCardAndAddressKey}:{token}");
@@ -186,10 +115,10 @@ public static class TerminalCoffeeManager
         var cardList = WebClient.GetAsync<CardResponse>("/card", token).Result;
 
         var hasAddress = addressList.data.Count > 0;
-        if (!hasAddress) log.Info("Player does not have an address loaded.");
+        if (!hasAddress) Log.Info("Player does not have an address loaded.");
 
         var hasCard = cardList.data.Count > 0;
-        if (!hasCard) log.Info("Player does not have a card loaded.");
+        if (!hasCard) Log.Info("Player does not have a card loaded.");
 
         // Assuming the presence of an address and a card means they are valid.
         var ready = hasAddress && hasCard;
@@ -199,7 +128,7 @@ public static class TerminalCoffeeManager
 
     public static void HandleTokenParchment(Book book, Player player, Vendor vendor)
     {
-        log.Info(
+        Log.Info(
             $"Handling token parchment for player {player.Name} on account {player.Account.AccountName} ({player.Account.AccountId}).");
 
         // Parchment has already been verified, but we'll still check. This really shouldn't happen.
@@ -212,7 +141,7 @@ public static class TerminalCoffeeManager
 
         var token = book.GetPage(1).PageText.Trim();
         RedisManager.Redis.GetDatabase().HashSet(RedisAccountIdToTokenKey, player.Account.AccountId, token);
-        log.Info($"Linked account to token.");
+        Log.Info($"Linked account to token.");
         player.Session.Network.EnqueueSend(new GameEventTell(vendor,
             "Your parchment has been received and your accounts have been linked.", player,
             ChatMessageType.Tell));
@@ -228,25 +157,34 @@ public static class TerminalCoffeeManager
 
     private static void OrderStatusTask()
     {
-        log.Info("Running Terminal Coffee Order Status check");
         var db = RedisManager.Redis.GetDatabase();
         var success = db.ListRightPop(RedisOrderSuccessKey);
         var failure = db.ListRightPop(RedisOrderFailureKey);
 
         if (success.HasValue)
         {
-            log.Info($"Successful order: {success.ToString()}");
+            Log.Info($"Successful order: {success.ToString()}");
+            var successJob = JsonSerializer.Deserialize<OrderSuccess>(success.ToString());
+            var player = PlayerManager.GetOnlinePlayer(successJob.for_player_id);
+            player.Session.Network.EnqueueSend(new GameEventTell(player.Session, $"Your order {successJob.order_id} was successful!",
+                BarkeepLienneName,
+                BarkeepLienneVendorId, player.Biota.Id, ChatMessageType.Tell));
         }
 
         if (failure.HasValue)
         {
-            log.Info($"Failed order: {failure.ToString()}");
+            Log.Info($"Failed order: {failure.ToString()}");
+            var failureJob = JsonSerializer.Deserialize<OrderFailure>(failure.ToString());
+            var player = PlayerManager.GetOnlinePlayer(failureJob.for_player_id);
+            player.Session.Network.EnqueueSend(new GameEventTell(player.Session, $"Your order processing failed! Please check with Terminal Coffee for next steps.",
+                BarkeepLienneName,
+                BarkeepLienneVendorId, player.Biota.Id, ChatMessageType.Tell));
         }
     }
 
     private static void RefreshCoffeeDataTask()
     {
-        log.Info("Running Terminal Coffee updates");
+        Log.Info("Running Terminal Coffee updates");
         try
         {
             var tokenParchmentWeenie = CreateTokenParchmentWeenie();
@@ -265,7 +203,7 @@ public static class TerminalCoffeeManager
         }
         catch (Exception ex)
         {
-            log.Error("Failed to get terminal coffee updates", ex);
+            Log.Error("Failed to get terminal coffee updates", ex);
         }
     }
 
@@ -285,7 +223,7 @@ public static class TerminalCoffeeManager
             var existing = innerCtx.Weenie.FirstOrDefault(w => w.ClassName == weenieName);
             if (existing != null)
             {
-                log.Info($"A weenie with the same name {weenieName} already exists.");
+                Log.Info($"A weenie with the same name {weenieName} already exists.");
                 weenie = existing;
                 return;
             }
@@ -368,7 +306,7 @@ public static class TerminalCoffeeManager
     {
         var tokenParchmentWeenieId = tokenParchmentWeenie.ClassId;
 
-        log.Info($"Adding token parchment with weenie id {tokenParchmentWeenieId} to vendor.");
+        Log.Info($"Adding token parchment with weenie id {tokenParchmentWeenieId} to vendor.");
         using var ctx = new WorldDbContext();
         var strategy = ctx.Database.CreateExecutionStrategy();
         strategy.Execute(() =>
@@ -381,7 +319,7 @@ public static class TerminalCoffeeManager
                 w.ObjectId == vendorId && w.Type == (ushort)PropertyInt.MerchandiseItemTypes);
             if (merchandiseTypes != null && (merchandiseTypes.Value & (int)ItemType.Writable) == 0)
             {
-                log.Info($"Altering {vendorId} to accept Writable item types from players.");
+                Log.Info($"Altering {vendorId} to accept Writable item types from players.");
                 merchandiseTypes.Value |= (int)ItemType.Writable;
                 innerCtx.SaveChanges();
             }
@@ -389,7 +327,7 @@ public static class TerminalCoffeeManager
             if (innerCtx.WeeniePropertiesCreateList.Any(w =>
                     w.ObjectId == vendorId && w.WeenieClassId == tokenParchmentWeenieId))
             {
-                log.Warn(
+                Log.Warn(
                     $"Weenie {tokenParchmentWeenieId} not added to vendor {vendorId} because vendor already sells it.");
                 transaction.Commit();
                 return;
@@ -431,16 +369,15 @@ public static class TerminalCoffeeManager
         // The weenie we're looking up should always exist.
         if (weenieName != null) return weenieName[weenieName.IndexOf("var_", StringComparison.Ordinal)..];
 
-        log.Error($"Attempted to look up weenie id {weenieId} and couldn't find it.");
+        Log.Error($"Attempted to look up weenie id {weenieId} and couldn't find it.");
         return null;
-
     }
 
     private static List<Weenie> CreateWeeniesFromCoffeeProduct(CoffeeProduct coffeeDetails)
     {
         if (coffeeDetails.variants.Count < 1)
         {
-            log.Warn(
+            Log.Warn(
                 $"Coffee product with name {coffeeDetails.name} and id {coffeeDetails.id} has no variants. Creating a bare weenie.");
             var generatedWeenie = CreateWeenieAndUpdateProperties(coffeeDetails.name, coffeeDetails.id,
                 coffeeDetails.description, "var_xxx", "Unknown Variant", 0);
@@ -450,7 +387,7 @@ public static class TerminalCoffeeManager
         var generatedWeenies = new List<Weenie>();
         foreach (var variant in coffeeDetails.variants)
         {
-            log.Info(
+            Log.Info(
                 $"Creating weenie for coffee with name {coffeeDetails.name}, id {coffeeDetails.id}, description {coffeeDetails.description}, type {variant.name}, price {variant.price / 100}.");
             generatedWeenies.Add(CreateWeenieAndUpdateProperties(coffeeDetails.name, coffeeDetails.id,
                 coffeeDetails.description, variant.id, variant.name, variant.price / 100));
@@ -478,7 +415,7 @@ public static class TerminalCoffeeManager
             weenie = innerCtx.Weenie.FirstOrDefault(w => w.ClassName == weenieName);
             if (weenie != null)
             {
-                log.Warn($"A weenie with the same name {weenieName} already exists.");
+                Log.Warn($"A weenie with the same name {weenieName} already exists.");
                 return;
             }
 
@@ -621,7 +558,7 @@ public static class TerminalCoffeeManager
     {
         var coffeeWeenieId = coffeeWeenie.ClassId;
 
-        log.Info($"Adding coffee with weenie id {coffeeWeenieId} to vendor.");
+        Log.Info($"Adding coffee with weenie id {coffeeWeenieId} to vendor.");
         using var ctx = new WorldDbContext();
         var strategy = ctx.Database.CreateExecutionStrategy();
         strategy.Execute(() =>
@@ -631,7 +568,7 @@ public static class TerminalCoffeeManager
             if (innerCtx.WeeniePropertiesCreateList.Any(w =>
                     w.ObjectId == vendorId && w.WeenieClassId == coffeeWeenieId))
             {
-                log.Warn($"Weenie {coffeeWeenieId} not added to vendor {vendorId} because vendor already sells it.");
+                Log.Warn($"Weenie {coffeeWeenieId} not added to vendor {vendorId} because vendor already sells it.");
                 return;
             }
 
