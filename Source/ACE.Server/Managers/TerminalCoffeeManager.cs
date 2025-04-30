@@ -166,7 +166,8 @@ public static class TerminalCoffeeManager
             Log.Info($"Successful order: {success.ToString()}");
             var successJob = JsonSerializer.Deserialize<OrderSuccess>(success.ToString());
             var player = PlayerManager.GetOnlinePlayer(successJob.for_player_id);
-            player.Session.Network.EnqueueSend(new GameEventTell(player.Session, $"Your order {successJob.order_id} was successful!",
+            player.Session.Network.EnqueueSend(new GameEventTell(player.Session,
+                $"Your order {successJob.order_id} was successful!",
                 BarkeepLienneName,
                 BarkeepLienneVendorId, player.Biota.Id, ChatMessageType.Tell));
         }
@@ -176,7 +177,8 @@ public static class TerminalCoffeeManager
             Log.Info($"Failed order: {failure.ToString()}");
             var failureJob = JsonSerializer.Deserialize<OrderFailure>(failure.ToString());
             var player = PlayerManager.GetOnlinePlayer(failureJob.for_player_id);
-            player.Session.Network.EnqueueSend(new GameEventTell(player.Session, $"Your order processing failed! Please check with Terminal Coffee for next steps.",
+            player.Session.Network.EnqueueSend(new GameEventTell(player.Session,
+                $"Your order processing failed! Please check with Terminal Coffee for next steps.",
                 BarkeepLienneName,
                 BarkeepLienneVendorId, player.Biota.Id, ChatMessageType.Tell));
         }
@@ -192,19 +194,168 @@ public static class TerminalCoffeeManager
             AddTokenParchmentToVendor(BarkeepLienneVendorId, tokenParchmentWeenie);
 
             var coffees = WebClient.GetAsync<CoffeeResponse>("/product").Result;
-
-            // TODO: Remove retired coffees from the vendor. I think I'll need to remove the rows from
-            // the world table, find the biota corresponding to that vendor, load it, and, uh, call ??? method.
+            var wholeAndGround = new Dictionary<string, List<Weenie>>();
 
             foreach (var weenie in coffees.data.SelectMany(CreateWeeniesFromCoffeeProduct))
             {
+                if (!weenie.ClassName.Contains("cron"))
+                {
+                    wholeAndGround.Add(weenie.ClassName, [weenie]);
+                }
+
                 AddCoffeeWeenieToVendor(BarkeepLienneVendorId, weenie);
             }
+
+            foreach (var groundWeenie in coffees.data.Where(d => !d.description.Contains("subscription"))
+                         .SelectMany(CreateGroundWeeniesFromCoffeeProduct))
+            {
+                wholeAndGround[groundWeenie.ClassName.Replace("_ground", "")].Add(groundWeenie);
+            }
+
+            CreateRecipesForCoffees(wholeAndGround);
         }
         catch (Exception ex)
         {
             Log.Error("Failed to get terminal coffee updates", ex);
         }
+    }
+
+
+    private static void CreateRecipesForCoffees(Dictionary<string, List<Weenie>> wholeAndGround)
+    {
+        // Heavy Grinder on Bag (not cron) -> 17 Ground Coffee Piles
+        // existing: Brew Kettle on water -> Full Brew Kettle
+        // Full Brew Kettle on Ground Coffee Pile -> Coffee
+
+        using var ctx = new WorldDbContext();
+        var strategy = ctx.Database.CreateExecutionStrategy();
+        strategy.Execute(() =>
+        {
+            using var innerCtx = new WorldDbContext();
+            using var transaction = innerCtx.Database.BeginTransaction();
+            // Using this for recipe ids, too.
+            var nextWeenieId = GetNextAvailableWeenieId(innerCtx);
+
+            var targetTypes = innerCtx.WeeniePropertiesInt.FirstOrDefault(w =>
+                w.ObjectId == 29201 /* Full Brew Kettle */ && w.Type == (ushort)PropertyInt.TargetType);
+            if (targetTypes == null)
+            {
+                innerCtx.WeeniePropertiesInt.Add(new WeeniePropertiesInt
+                {
+                    ObjectId = 29201 /* Full Brew Kettle */,
+                    Type = (ushort)PropertyInt.TargetType,
+                    Value = (int)ItemType.Food
+                });
+            }
+            else
+            {
+                targetTypes.Value |= (int)ItemType.Food;
+            }
+
+            innerCtx.SaveChanges();
+
+            foreach (var kv in wholeAndGround)
+            {
+                var whole = kv.Value[0];
+                var ground = kv.Value[1];
+
+                var name = innerCtx.WeeniePropertiesString
+                    .Where(wps => wps.ObjectId == whole.ClassId && wps.Type == (int)PropertyString.Name)
+                    .Select(wps => wps.Value).First();
+                if (name == null)
+                {
+                    Log.Warn($"Found coffee without name on weenie {whole.ClassName}.");
+                    return;
+                }
+
+                var match = Regex.Match(name, @"^Bag of (?<name>.*?) Coffee.*?(?<size>\d+)oz");
+                var coffeeName = match.Groups["name"].Value;
+                var size = int.Parse(match.Groups["size"].Value);
+
+                Log.Info($"Creating recipe for grinding {whole.ClassId} into {ground.ClassId}");
+
+                innerCtx.Recipe.Add(new Recipe
+                {
+                    Id = nextWeenieId,
+                    Unknown1 = 0,
+                    Skill = (uint)Skill.Cooking,
+                    Difficulty = 1,
+                    SalvageType = 0,
+                    SuccessWCID = ground.ClassId,
+                    SuccessAmount =
+                        (uint)Math.Floor(size * 28.35 / 20.0), /* 20 gram dose; size e.g. 12 oz -> ~340 gram */
+                    SuccessMessage = $"You grind the {coffeeName} beans.",
+                    FailWCID = 0,
+                    FailAmount = 0,
+                    FailMessage = $"You fail to grind the {coffeeName} beans.",
+                    SuccessDestroySourceChance = 0,
+                    SuccessDestroySourceAmount = 0,
+                    SuccessDestroySourceMessage = null,
+                    SuccessDestroyTargetChance = 1,
+                    SuccessDestroyTargetAmount = 1,
+                    SuccessDestroyTargetMessage = null,
+                    FailDestroySourceChance = 0,
+                    FailDestroySourceAmount = 0,
+                    FailDestroySourceMessage = null,
+                    FailDestroyTargetChance = 1,
+                    FailDestroyTargetAmount = 1,
+                    FailDestroyTargetMessage = null,
+                    DataId = 0,
+                    LastModified = DateTime.Now
+                });
+
+                Log.Info($"Creating recipe for brewing ground {ground.ClassId} into brewed coffee");
+
+                innerCtx.Recipe.Add(new Recipe
+                {
+                    Id = nextWeenieId + 1,
+                    Unknown1 = 0,
+                    Skill = (uint)Skill.Cooking,
+                    Difficulty = 1,
+                    SalvageType = 0,
+                    SuccessWCID = 2454 /* Coffee */,
+                    SuccessAmount = 1,
+                    SuccessMessage = $"You brew the {coffeeName} dose.",
+                    FailWCID = 0,
+                    FailAmount = 0,
+                    FailMessage = $"You fail to brew the {coffeeName} dose.",
+                    SuccessDestroySourceChance = 0,
+                    SuccessDestroySourceAmount = 0,
+                    SuccessDestroySourceMessage = null,
+                    SuccessDestroyTargetChance = 1,
+                    SuccessDestroyTargetAmount = 1,
+                    SuccessDestroyTargetMessage = null,
+                    FailDestroySourceChance = 0,
+                    FailDestroySourceAmount = 0,
+                    FailDestroySourceMessage = null,
+                    FailDestroyTargetChance = 1,
+                    FailDestroyTargetAmount = 1,
+                    FailDestroyTargetMessage = null,
+                    DataId = 0,
+                    LastModified = DateTime.Now
+                });
+
+                innerCtx.CookBook.Add(new CookBook
+                {
+                    RecipeId = nextWeenieId,
+                    SourceWCID = 7823, /* Heavy Grinder */
+                    TargetWCID = whole.ClassId,
+                    LastModified = DateTime.Now
+                });
+
+                innerCtx.CookBook.Add(new CookBook
+                {
+                    RecipeId = nextWeenieId + 1,
+                    SourceWCID = 29201, /* Full Brew Kettle */
+                    TargetWCID = ground.ClassId,
+                    LastModified = DateTime.Now
+                });
+                nextWeenieId += 2;
+            }
+
+            innerCtx.SaveChanges();
+            transaction.Commit();
+        });
     }
 
     private static Weenie CreateTokenParchmentWeenie()
@@ -355,10 +506,10 @@ public static class TerminalCoffeeManager
         return max + 1;
     }
 
-    private static string CreateWeenieClassName(string name, string id, string variantId)
+    private static string CreateWeenieClassName(string name, string id, string variantId, string suffix = "")
     {
         var cleanName = Regex.Replace(name, @"[^0-9a-zA-Z ]", "").Replace('_', ' ').ToLowerInvariant();
-        return $"coffee_{cleanName}_{id}_{variantId}";
+        return $"coffee_{cleanName}_{id}_{variantId}{suffix}";
     }
 
     private static string WeenieIdToVariantId(uint weenieId)
@@ -371,6 +522,30 @@ public static class TerminalCoffeeManager
 
         Log.Error($"Attempted to look up weenie id {weenieId} and couldn't find it.");
         return null;
+    }
+
+    // Duplication...
+    private static List<Weenie> CreateGroundWeeniesFromCoffeeProduct(CoffeeProduct coffeeDetails)
+    {
+        if (coffeeDetails.variants.Count < 1)
+        {
+            Log.Warn(
+                $"Coffee product with name {coffeeDetails.name} and id {coffeeDetails.id} has no variants. Creating a bare weenie.");
+            var generatedWeenie = CreateGroundWeenieAndUpdateProperties(coffeeDetails.name, coffeeDetails.id,
+                coffeeDetails.description, "var_xxx", "Unknown Variant", 0);
+            return [generatedWeenie];
+        }
+
+        var generatedWeenies = new List<Weenie>();
+        foreach (var variant in coffeeDetails.variants)
+        {
+            Log.Info(
+                $"Creating weenie for ground coffee with name {coffeeDetails.name}, id {coffeeDetails.id}, description {coffeeDetails.description}, type {variant.name}, price {variant.price / 100}.");
+            generatedWeenies.Add(CreateGroundWeenieAndUpdateProperties(coffeeDetails.name, coffeeDetails.id,
+                coffeeDetails.description, variant.id, variant.name, variant.price / 100));
+        }
+
+        return generatedWeenies;
     }
 
     private static List<Weenie> CreateWeeniesFromCoffeeProduct(CoffeeProduct coffeeDetails)
@@ -394,6 +569,48 @@ public static class TerminalCoffeeManager
         }
 
         return generatedWeenies;
+    }
+
+    private static Weenie CreateGroundWeenieAndUpdateProperties(string name, string id, string description,
+        string variantId,
+        string variantName, int price)
+    {
+        var now = DateTime.UtcNow;
+        var weenieName = CreateWeenieClassName(name, id, variantId, "_ground");
+
+        using var ctx = new WorldDbContext();
+        var strategy = ctx.Database.CreateExecutionStrategy();
+
+        Weenie weenie = null;
+        strategy.Execute(() =>
+        {
+            using var innerCtx = new WorldDbContext();
+            using var transaction = innerCtx.Database.BeginTransaction();
+            weenie = innerCtx.Weenie.FirstOrDefault(w => w.ClassName == weenieName);
+            if (weenie != null)
+            {
+                Log.Warn($"A weenie with the same name {weenieName} already exists.");
+                return;
+            }
+
+            var nextWeenieId = GetNextAvailableWeenieId(innerCtx);
+            weenie = new Weenie()
+            {
+                ClassId = nextWeenieId,
+                ClassName = weenieName,
+                Type = (int)WeenieType.Food,
+                LastModified = now
+            };
+            innerCtx.Weenie.Add(weenie);
+
+            innerCtx.WeeniePropertiesInt.AddRange(GroundCoffeeWeenieIntProperties(price, nextWeenieId));
+            innerCtx.WeeniePropertiesString.AddRange(GroundCoffeeWeenieStringProperties(name, description, variantName,
+                nextWeenieId));
+            innerCtx.WeeniePropertiesDID.AddRange(GroundCoffeeWeenieDidProperties(nextWeenieId));
+            innerCtx.SaveChanges();
+            transaction.Commit();
+        });
+        return weenie;
     }
 
     private static Weenie CreateWeenieAndUpdateProperties(string name, string id, string description,
@@ -430,17 +647,37 @@ public static class TerminalCoffeeManager
             };
             innerCtx.Weenie.Add(weenie);
 
-            innerCtx.WeeniePropertiesInt.AddRange(CoffeeWeenieToIntProperties(price, nextWeenieId, isSubscription));
-            innerCtx.WeeniePropertiesString.AddRange(CoffeeWeenieToStringProperties(name, description, variantName,
+            innerCtx.WeeniePropertiesInt.AddRange(CoffeeWeenieIntProperties(price, nextWeenieId, isSubscription));
+            innerCtx.WeeniePropertiesString.AddRange(CoffeeWeenieStringProperties(name, description, variantName,
                 nextWeenieId, isSubscription));
-            innerCtx.WeeniePropertiesDID.AddRange(CoffeeWeenieToDidProperties(nextWeenieId, isSubscription));
+            innerCtx.WeeniePropertiesDID.AddRange(CoffeeWeenieDidProperties(nextWeenieId, isSubscription));
             innerCtx.SaveChanges();
             transaction.Commit();
         });
         return weenie;
     }
 
-    private static List<WeeniePropertiesDID> CoffeeWeenieToDidProperties(uint nextWeenieId,
+    private static List<WeeniePropertiesDID> GroundCoffeeWeenieDidProperties(uint nextWeenieId)
+    {
+        return
+        [
+            new WeeniePropertiesDID()
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyDataId.Setup, Value = 0x020000E9 },
+            new WeeniePropertiesDID()
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyDataId.SoundTable, Value = 0x20000014 },
+            new WeeniePropertiesDID()
+            {
+                ObjectId = nextWeenieId, Type = (ushort)PropertyDataId.Icon,
+                Value = 0x06001D86 /* same as 'Cocoa Mixture' */
+            },
+            new WeeniePropertiesDID()
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyDataId.PhysicsEffectTable, Value = 0x3400002B },
+            new WeeniePropertiesDID()
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyDataId.UseSound, Value = (uint)Sound.Eat1 }
+        ];
+    }
+
+    private static List<WeeniePropertiesDID> CoffeeWeenieDidProperties(uint nextWeenieId,
         bool isSubscription)
     {
         return
@@ -463,7 +700,41 @@ public static class TerminalCoffeeManager
         ];
     }
 
-    private static List<WeeniePropertiesString> CoffeeWeenieToStringProperties(string name,
+    private static List<WeeniePropertiesString> GroundCoffeeWeenieStringProperties(string name,
+        string description,
+        string variantName, uint nextWeenieId)
+    {
+        return
+        [
+            new WeeniePropertiesString()
+            {
+                ObjectId = nextWeenieId, Type = (ushort)PropertyString.Name,
+                Value = $"20g Dose of Ground {name} Coffee ({variantName})"
+            },
+            new WeeniePropertiesString()
+            {
+                ObjectId = nextWeenieId, Type = (ushort)PropertyString.Use,
+                Value = "These beans are ready to brew. Again, I guess you could consume them directly."
+            },
+            new WeeniePropertiesString()
+            {
+                ObjectId = nextWeenieId, Type = (ushort)PropertyString.ShortDesc,
+                Value = $"20g Dose of ground {name} coffee beans ({variantName})"
+            },
+            new WeeniePropertiesString()
+            {
+                ObjectId = nextWeenieId, Type = (ushort)PropertyString.LongDesc,
+                Value = $"20g Dose of ground {name} coffee beans.\n\n{description}"
+            },
+            new WeeniePropertiesString()
+            {
+                ObjectId = nextWeenieId, Type = (ushort)PropertyString.PluralName,
+                Value = $"20g Doses of ground {name} Coffee ({variantName})"
+            }
+        ];
+    }
+
+    private static List<WeeniePropertiesString> CoffeeWeenieStringProperties(string name,
         string description,
         string variantName, uint nextWeenieId, bool isSubscription)
     {
@@ -507,7 +778,52 @@ public static class TerminalCoffeeManager
         ];
     }
 
-    private static List<WeeniePropertiesInt> CoffeeWeenieToIntProperties(int price, uint nextWeenieId,
+    private static List<WeeniePropertiesInt> GroundCoffeeWeenieIntProperties(int price, uint nextWeenieId)
+    {
+        var propertiesInt = new List<WeeniePropertiesInt>()
+        {
+            new()
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.ItemType, Value = (int)ItemType.Food },
+            new()
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.EncumbranceVal, Value = 50 },
+            new()
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.Mass, Value = 25 },
+            new()
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.ValidLocations, Value = 0 },
+            new()
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.MaxStackSize, Value = 100 },
+            new()
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.StackSize, Value = 1 },
+            new()
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.StackUnitEncumbrance, Value = 50 },
+            new()
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.StackUnitMass, Value = 25 },
+            new()
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.StackUnitValue, Value = price },
+            new()
+            {
+                ObjectId = nextWeenieId, Type = (ushort)PropertyInt.ItemUseable,
+                Value = (int)Usable.Contained
+            },
+            new()
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.Value, Value = price },
+            new()
+            {
+                ObjectId = nextWeenieId, Type = (ushort)PropertyInt.PhysicsState,
+                Value = (int)(PhysicsState.Ethereal | PhysicsState.IgnoreCollisions | PhysicsState.Gravity)
+            },
+            new WeeniePropertiesInt()
+            {
+                ObjectId = nextWeenieId, Type = (ushort)PropertyInt.BoosterEnum,
+                Value = (int)PropertyAttribute2nd.Stamina
+            },
+            new WeeniePropertiesInt()
+                { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.BoostValue, Value = 12 }
+        };
+        return propertiesInt;
+    }
+
+    private static List<WeeniePropertiesInt> CoffeeWeenieIntProperties(int price, uint nextWeenieId,
         bool isSubscription)
     {
         var propertiesInt = new List<WeeniePropertiesInt>()
@@ -550,7 +866,7 @@ public static class TerminalCoffeeManager
             Value = (int)PropertyAttribute2nd.Stamina
         });
         propertiesInt.Add(new WeeniePropertiesInt()
-            { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.BoostValue, Value = 120 });
+            { ObjectId = nextWeenieId, Type = (ushort)PropertyInt.BoostValue, Value = 12 });
         return propertiesInt;
     }
 
